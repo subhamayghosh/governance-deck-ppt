@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LPL QE Governance Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loading">
+    <div class="spinner"></div>
+    <p>Loading QE Governance Data...</p>
+</div>
+
+<!-- Sidebar -->
+<nav class="sidebar">
+    <div class="sidebar-brand">
+        <h2>LPL QE Connect</h2>
+        <small>Governance Dashboard</small>
+    </div>
+    <ul class="sidebar-nav">
+        <li><a href="#" data-section="dashboard" class="active"><span class="icon">&#9632;</span> <span>Dashboard</span></a></li>
+        <li><a href="#" data-section="projects"><span class="icon">&#9733;</span> <span>Project Details</span></a></li>
+        <li><a href="#" data-section="testcases"><span class="icon">&#9881;</span> <span>Test Cases</span></a></li>
+        <li><a href="#" data-section="insprint"><span class="icon">&#9658;</span> <span>In-Sprint Data</span></a></li>
+        <li><a href="#" data-section="defects"><span class="icon">&#9888;</span> <span>Defect Data</span></a></li>
+        <li><a href="#" data-section="daily"><span class="icon">&#8634;</span> <span>Daily Execution</span></a></li>
+        <li><a href="#" data-section="branches"><span class="icon">&#8680;</span> <span>Branch Test Cases</span></a></li>
+        <li><a href="#" data-section="release"><span class="icon">&#10003;</span> <span>Release Day</span></a></li>
+        <li><a href="#" data-section="rad"><span class="icon">&#9883;</span> <span>RAD Enabled</span></a></li>
+        <li><a href="#" data-section="monthly"><span class="icon">&#128197;</span> <span>Monthly Sheet</span></a></li>
+        <li><a href="#" data-section="generate" style="color:var(--accent-light);font-weight:700"><span class="icon">&#9889;</span> <span>Generate PPT</span></a></li>
+    </ul>
+</nav>
+
+<!-- Main Content -->
+<div class="main-content">
+
+    <!-- File Upload Bar -->
+    <div class="upload-bar" id="uploadBar">
+        <div class="upload-item">
+            <div class="upload-label">
+                <span class="upload-icon">&#128196;</span>
+                <div>
+                    <div class="upload-title">Excel Data File</div>
+                    <div class="upload-filename" id="currentExcelName">Loading...</div>
+                </div>
+            </div>
+            <label class="btn btn-outline" style="padding:6px 16px; font-size:12px; cursor:pointer;">
+                Upload New Excel
+                <input type="file" accept=".xlsx,.xlsm,.xls" style="display:none" onchange="uploadExcel(this)">
+            </label>
+        </div>
+        <div class="upload-item">
+            <div class="upload-label">
+                <span class="upload-icon">&#128202;</span>
+                <div>
+                    <div class="upload-title">PPT Template</div>
+                    <div class="upload-filename" id="currentPptxName">Loading...</div>
+                </div>
+            </div>
+            <label class="btn btn-outline" style="padding:6px 16px; font-size:12px; cursor:pointer;">
+                Upload New Template
+                <input type="file" accept=".pptx" style="display:none" onchange="uploadPptx(this)">
+            </label>
+        </div>
+    </div>
+
+    <!-- ===== DASHBOARD ===== -->
+    <div class="section active" id="sec-dashboard">
+        <div class="page-header">
+            <h1>QE Governance Overview</h1>
+            <button class="btn btn-accent" onclick="navigateTo('generate')">&#9889; Generate PPT</button>
+        </div>
+
+        <div class="summary-cards" id="summaryCards"></div>
+
+        <div class="charts-grid">
+            <div class="panel">
+                <div class="panel-header"><h3>Automation Coverage by Domain</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartAutoDomain"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Defect Severity Distribution</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartDefectSeverity"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Defects by Domain</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartDefectDomain"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Daily Execution Pass Rate</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartDailyExec"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>RAD Enablement by Domain</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartRAD"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Release Day Automation by Domain</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartRelease"></canvas></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ===== PROJECT DETAILS ===== -->
+    <div class="section" id="sec-projects">
+        <div class="page-header"><h1>Project Details</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterProjectDomain" onchange="filterTable('projectTable', this.value, 4)">
+                <option value="">All Domains</option>
+            </select>
+            <label>Status:</label>
+            <select id="filterProjectStatus" onchange="filterTable('projectTable', this.value, 8)">
+                <option value="">All</option>
+                <option value="Active">Active</option>
+                <option value="Inactive">Inactive</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchProject" oninput="searchTable('projectTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="projectTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== TEST CASES ===== -->
+    <div class="section" id="sec-testcases">
+        <div class="page-header"><h1>Test Case Details</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterTCDomain" onchange="filterTable('tcsTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchTC" oninput="searchTable('tcsTable', this.value)">
+        </div>
+        <div class="charts-grid">
+            <div class="panel">
+                <div class="panel-header"><h3>Test Cases by Priority</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartTCPriority"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Automation Coverage by Team</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartTCAutoTeam"></canvas></div></div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="tcsTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== IN-SPRINT DATA ===== -->
+    <div class="section" id="sec-insprint">
+        <div class="page-header"><h1>In-Sprint Automation Data</h1></div>
+        <div class="filter-bar">
+            <label>Sprint:</label>
+            <select id="filterInSprintSprint" onchange="filterTable('insprintTable', this.value, 'Sprint')">
+                <option value="">All Sprints</option>
+            </select>
+            <label>Domain:</label>
+            <select id="filterInSprintDomain" onchange="filterTable('insprintTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchInSprint" oninput="searchTable('insprintTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="insprintTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== DEFECT DATA ===== -->
+    <div class="section" id="sec-defects">
+        <div class="page-header"><h1>Defect Data</h1></div>
+        <div class="filter-bar">
+            <label>Sprint:</label>
+            <select id="filterDefectSprint" onchange="filterTable('defectTable', this.value, 'Sprint')">
+                <option value="">All Sprints</option>
+            </select>
+            <label>Domain:</label>
+            <select id="filterDefectDomain" onchange="filterTable('defectTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <label>Type:</label>
+            <select id="filterDefectType" onchange="filterTable('defectTable', this.value, 'Type Of Defect')">
+                <option value="">All</option>
+                <option value="Manual">Manual</option>
+                <option value="Automation">Automation</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchDefect" oninput="searchTable('defectTable', this.value)">
+        </div>
+        <div class="charts-grid">
+            <div class="panel">
+                <div class="panel-header"><h3>Defects by Sprint</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartDefectSprint"></canvas></div></div>
+            </div>
+            <div class="panel">
+                <div class="panel-header"><h3>Manual vs Automation Defects</h3></div>
+                <div class="panel-body"><div class="chart-container"><canvas id="chartDefectType"></canvas></div></div>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="defectTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== DAILY EXECUTION ===== -->
+    <div class="section" id="sec-daily">
+        <div class="page-header"><h1>Daily Execution Summary</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterDailyDomain" onchange="filterTable('dailyTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchDaily" oninput="searchTable('dailyTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="dailyTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== BRANCH TEST CASES ===== -->
+    <div class="section" id="sec-branches">
+        <div class="page-header"><h1>Branch Test Case Details</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterBranchDomain" onchange="filterTable('branchTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchBranch" oninput="searchTable('branchTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="branchTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== RELEASE DAY ===== -->
+    <div class="section" id="sec-release">
+        <div class="page-header"><h1>Release Day Test Cases</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterReleaseDomain" onchange="filterTable('releaseTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchRelease" oninput="searchTable('releaseTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="releaseTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== RAD ENABLED ===== -->
+    <div class="section" id="sec-rad">
+        <div class="page-header"><h1>RAD Enablement</h1></div>
+        <div class="filter-bar">
+            <label>Domain:</label>
+            <select id="filterRADDomain" onchange="filterTable('radTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search teams..." id="searchRAD" oninput="searchTable('radTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="radTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== MONTHLY SHEET ===== -->
+    <div class="section" id="sec-monthly">
+        <div class="page-header"><h1>Monthly Automation Sheet</h1></div>
+        <div class="filter-bar">
+            <label>Month:</label>
+            <select id="filterMonthlyMonth" onchange="filterTable('monthlyTable', this.value, \"Month'Year\")">
+                <option value="">All Months</option>
+            </select>
+            <label>Domain:</label>
+            <select id="filterMonthlyDomain" onchange="filterTable('monthlyTable', this.value, 'Domain')">
+                <option value="">All Domains</option>
+            </select>
+            <input type="text" placeholder="Search..." id="searchMonthly" oninput="searchTable('monthlyTable', this.value)">
+        </div>
+        <div class="panel">
+            <div class="table-wrapper" id="monthlyTableWrapper"></div>
+        </div>
+    </div>
+
+    <!-- ===== GENERATE PPT ===== -->
+    <div class="section" id="sec-generate">
+        <div class="page-header">
+            <h1>Generate Presentation</h1>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>Select Slides to Include</h3>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn btn-outline" style="padding:6px 14px; font-size:12px;" onclick="toggleAllSlides(true)">Select All</button>
+                    <button class="btn btn-outline" style="padding:6px 14px; font-size:12px;" onclick="toggleAllSlides(false)">Deselect All</button>
+                </div>
+            </div>
+            <div class="panel-body">
+                <div id="slideSelector" class="slide-selector">
+                    <p style="color:var(--text-muted)">Loading slides from template...</p>
+                </div>
+            </div>
+        </div>
+
+        <div style="text-align:center; margin: 24px 0;">
+            <span id="slideCount" style="font-size:14px; color:var(--text-muted); margin-right:16px;"></span>
+            <button class="btn btn-accent" onclick="generatePPT()" style="font-size:16px; padding: 14px 40px;">
+                &#9889; Generate & Download PPT
+            </button>
+            <div id="pptStatus" style="margin-top:16px; color:var(--text-muted);"></div>
+        </div>
+    </div>
+
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

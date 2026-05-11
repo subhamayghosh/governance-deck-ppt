@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# LPL sensitive data — do not commit
+*.xlsm
+*.xlsx
+*.pptx
+webapp/uploads/*.xlsm
+webapp/uploads/*.xlsx
+webapp/uploads/*.pptx
+webapp/uploads/.active_files.json
+
+# Local IDE / Claude Code settings
+.claude/

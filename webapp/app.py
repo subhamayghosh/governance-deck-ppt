@@ -262,9 +262,13 @@ def index():
 
 @app.route("/api/file-info")
 def file_info():
+    excel_ok = os.path.exists(active_files.get("excel", ""))
+    pptx_ok = os.path.exists(active_files.get("pptx", ""))
     return jsonify({
-        "excel_name": active_files["excel_name"],
-        "pptx_name": active_files["pptx_name"],
+        "excel_name": active_files["excel_name"] if excel_ok else "(none — please upload)",
+        "pptx_name": active_files["pptx_name"] if pptx_ok else "(none — please upload)",
+        "excel_loaded": excel_ok,
+        "pptx_loaded": pptx_ok,
     })
 
 
@@ -347,6 +351,12 @@ def upload_pptx():
 @app.route("/api/pptx-slides")
 def pptx_slides():
     """Return list of slide titles from the active PPTX template."""
+    if not os.path.exists(active_files.get("pptx", "")):
+        return jsonify({
+            "slides": [],
+            "total": 0,
+            "error": "No PPT template uploaded yet. Please upload one first.",
+        })
     try:
         prs = Presentation(active_files["pptx"])
         slides = []
@@ -366,6 +376,10 @@ def pptx_slides():
 
 @app.route("/api/data")
 def api_data():
+    if not os.path.exists(active_files.get("excel", "")):
+        return jsonify({
+            "error": "No Excel uploaded yet. Please upload the monthly governance workbook first.",
+        }), 400
     data = read_excel_data()
     summaries = compute_summaries(data)
     return jsonify({"data": data, "summaries": summaries})
@@ -373,6 +387,17 @@ def api_data():
 
 @app.route("/api/generate-ppt", methods=["POST"])
 def generate_ppt():
+    # Pre-flight: both files must exist
+    missing = []
+    if not os.path.exists(active_files.get("excel", "")):
+        missing.append("Excel workbook")
+    if not os.path.exists(active_files.get("pptx", "")):
+        missing.append("PPT template")
+    if missing:
+        return jsonify({
+            "error": f"Please upload the {' and '.join(missing)} before generating.",
+        }), 400
+
     req_data = request.get_json() or {}
     selected_slides = req_data.get("slides", None)
 

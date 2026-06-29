@@ -281,53 +281,112 @@ def update_slide_11(slide, data):
 # ==============================================================================
 # SLIDE 12: Automation Snapshot (InSprintData)
 # ==============================================================================
+def _automation_coverage_pct(v):
+    """Normalize an Automation coverage cell to a 0..100 percentage.
+
+    Accepts 0.85, '85%', '85', 85, etc. Returns None if unparseable.
+    """
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        s = str(v).strip().replace("%", "")
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+    # Excel often stores percentages as fractions (0.85 = 85%)
+    return f * 100 if abs(f) <= 1 else f
+
+
 def update_slide_12(slide, data):
-    """Update automation snapshot bar chart and reasons table."""
+    """Update the Automation Snapshot bar chart on slide 12.
+
+    Rule for the '<70 % In-Sprint' and '>70 % In-Sprint' bars (user-specified):
+      1. Restrict to the LAST 2 sprint cycles found in InSprintData (Sprint
+         values starting with 'Sprint ', sorted numerically).
+      2. For each unique 'Scrum team' across those rows, take its BEST
+         (maximum) 'Automation coverage' value.
+      3. Count teams whose best coverage is >= 70  -> '>70 % In-Sprint'
+         Count teams whose best coverage is <  70  -> '<70 % In-Sprint'
+
+    Rows with blank/unparseable Automation coverage are skipped.
+
+    The other three bars ('No Automation', 'Script Maintainance',
+    'Tech-Debt Automation') are left at whatever values exist in the
+    template chart — they are not auto-derived in this implementation.
+    """
     insprint = data.get("insprint_data", [])
     if not insprint:
         return
 
-    # Categorize teams by automation health
-    team_status = {}
+    # 1. Find last 2 sprint cycles by numeric sort (handles e.g. 26.1.10 > 26.1.2)
+    sprint_col = None
+    if insprint:
+        for k in insprint[0].keys():
+            if str(k).strip().lower() == "sprint":
+                sprint_col = k
+                break
+    if sprint_col is None:
+        sprint_col = "Sprint  "  # trailing-spaces variant seen in InSprintData
+    sprints = sorted(
+        {str(r.get(sprint_col, "")).strip() for r in insprint
+         if str(r.get(sprint_col, "")).strip().startswith("Sprint ")},
+        key=_sprint_sort_key,
+    )[-2:]
+    if not sprints:
+        return
+
+    # 2. For each team in those sprints, take its best Automation coverage
+    team_best = {}
     for r in insprint:
+        if str(r.get(sprint_col, "")).strip() not in sprints:
+            continue
         team = str(r.get("Scrum team", "")).strip()
         if not team:
             continue
-        sprint = str(r.get("Sprint", "")).strip()
-        if "Sprint" not in sprint:
+        pct = _automation_coverage_pct(r.get("Automation coverage"))
+        if pct is None:
+            continue
+        if team not in team_best or pct > team_best[team]:
+            team_best[team] = pct
+
+    # 3. Classify teams
+    above_70 = sum(1 for v in team_best.values() if v >= 70)
+    below_70 = sum(1 for v in team_best.values() if v < 70)
+
+    for s in slide.shapes:
+        if not s.has_chart:
+            continue
+        chart = s.chart
+        try:
+            cats = [str(c).strip() for c in chart.plots[0].categories]
+        except Exception:
+            continue
+        # Locate the Automation Snapshot bar chart by its categories
+        if "<70 % In-Sprint" not in cats or ">70 % In-Sprint" not in cats:
             continue
 
-        cov = _num(r.get("Automation coverage", 0))
-        designed = sum(_num(r.get(f"Test Case Designed {p}", 0)) for p in ["P0", "P1", "P2", "P3", "P4"])
-        automated = sum(_num(r.get(f"Test case Automated {p}", 0)) for p in ["P0", "P1", "P2", "P3", "P4"])
-        maintained = _num(r.get("TCs Maintained", 0))
-        tech_debt = sum(_num(r.get(f"Auto tech debt {p}", 0)) for p in ["P0", "P1", "P2", "P3", "P4"])
+        # Preserve existing values for the other categories
+        try:
+            series_list = list(chart.plots[0].series)
+            series_name = series_list[0].name or "Teams"
+            existing = [int(v) if v is not None else 0 for v in series_list[0].values]
+        except Exception:
+            series_name = "Teams"
+            existing = [0] * len(cats)
+        while len(existing) < len(cats):
+            existing.append(0)
 
-        if designed == 0 and automated == 0:
-            team_status[team] = "no_auto"
-        elif maintained > 0 and designed == 0:
-            team_status[team] = "maintenance"
-        elif tech_debt > 0 and designed == 0:
-            team_status[team] = "tech_debt"
-        elif cov < 0.7:
-            team_status[team] = "below_70"
-        else:
-            team_status[team] = "above_70"
-
-    counts = {
-        "No Automation": sum(1 for v in team_status.values() if v == "no_auto"),
-        "Script Maintainance": sum(1 for v in team_status.values() if v == "maintenance"),
-        "Tech-Debt Automation": sum(1 for v in team_status.values() if v == "tech_debt"),
-        "<70 % In-Sprint": sum(1 for v in team_status.values() if v == "below_70"),
-        ">70 % In-Sprint": sum(1 for v in team_status.values() if v == "above_70"),
-    }
-
-    charts = _get_charts_by_name(slide)
-    for name, shape in charts.items():
-        chart = shape.chart
-        cats = [str(c).strip() for c in chart.plots[0].categories]
-        if "No Automation" in cats[0] if cats else False:
-            update_chart_data(chart, list(counts.keys()), {"Teams": list(counts.values())})
+        new_values = list(existing)
+        for i, cat in enumerate(cats):
+            if cat == "<70 % In-Sprint":
+                new_values[i] = below_70
+            elif cat == ">70 % In-Sprint":
+                new_values[i] = above_70
+        update_chart_data(chart, cats, {series_name: new_values})
+        break
 
 
 # ==============================================================================
@@ -365,6 +424,113 @@ DEFECT_LABEL_14 = {
     "Rectangle 10": "Trading",
     "Rectangle 17": "Automation",
 }
+
+# Per-slide config for the Manual defect mini-charts (slides 13 & 14):
+#   (label_shape, chart_shape, excel_sub_domain, display_label)
+DEFECT_VIEW_SLIDE_13 = [
+    ("Rectangle 4",  "Chart 5",  "ALM-Technology",                 "ALM – Technology"),
+    ("Rectangle 6",  "Chart 7",  "Corporate Systems(TFG)",         "Corporate Systems (TFG)"),
+    ("Rectangle 8",  "Chart 9",  "Custody, Clearing & Settlement", "Custody, Clearing & Settlement"),
+    ("Rectangle 10", "Chart 11", "Data",                           "Data"),
+    ("Rectangle 12", "Chart 13", "Infosec",                        "Infosec"),
+    ("Rectangle 14", "Chart 15", "Practice Management",            "Practice Management"),
+]
+DEFECT_VIEW_SLIDE_14 = [
+    ("Rectangle 4",  "Chart 5",  "Service and Support", "Service and Support"),
+    ("Rectangle 6",  "Chart 7",  "SRC",                 "SRC"),
+    ("Rectangle 8",  "Chart 9",  "Technology",          "Technology"),
+    ("Rectangle 10", "Chart 11", "Trading",             "Trading"),
+]
+
+
+def _sprint_sort_key(sprint_name):
+    """Numeric sort key for sprint names like 'Sprint 26.1.4'.
+
+    Extracts every integer in the string and returns them as a tuple so
+    'Sprint 26.1.10' correctly sorts AFTER 'Sprint 26.1.2' (and any future
+    naming variant — 'Sprint 27.2.1', 'Sprint 2026.1.4', etc. — keeps working).
+    Falls back to the raw string for anything without numbers.
+    """
+    import re
+    nums = re.findall(r"\d+", str(sprint_name))
+    return tuple(int(n) for n in nums) if nums else (str(sprint_name),)
+
+
+def _last_two_sprint_cycles(data):
+    """Return the two most-recent sprint-cycle values from DefectData.
+
+    A sprint cycle is any Sprint value starting with 'Sprint ' (e.g. 'Sprint 26.1.4').
+    Monthly buckets like \"January'26\" are excluded. Sprints are sorted
+    numerically (so 'Sprint 26.1.10' comes after 'Sprint 26.1.2', not before).
+    """
+    sprints = set()
+    for r in data.get("defect_data", []):
+        s = str(r.get("Sprint", "")).strip()
+        if s.startswith("Sprint "):
+            sprints.add(s)
+    return sorted(sprints, key=_sprint_sort_key)[-2:]
+
+
+def _compute_automation_prod_defects(data):
+    """{sub_domain: prod_defect_count_total} filtered by:
+       Sprint is a monthly bucket (NOT 'Sprint X.Y.Z'),
+       Type Of Defect is Manual OR Automation,
+       Sub Domain != TBD.
+    Sums the 'Prod Defect Count' column per sub-domain.
+    """
+    result = {}
+    for r in data.get("defect_data", []):
+        s = str(r.get("Sprint", "")).strip()
+        if not s or s.startswith("Sprint "):
+            continue  # skip sprint cycles, keep only month buckets
+        t = str(r.get("Type Of Defect", "")).strip().lower()
+        if t not in ("manual", "automation"):
+            continue
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
+            continue
+        result[sub] = result.get(sub, 0) + _num(r.get("Prod Defect Count", 0))
+    return result
+
+
+# Maps the labels shown in the Automation chart (slide 14, Chart 18) to the
+# Excel Sub Domain values. Keep the order in sync with the chart's existing
+# categories so legend colors stay stable.
+AUTOMATION_CHART_LABELS = [
+    ("SRC",                             "SRC"),
+    ("Service and Support",             "Service and Support"),
+    ("Trading",                         "Trading"),
+    ("Corporate Systems",               "Corporate Systems(TFG)"),
+    ("Custody, clearing & settlement",  "Custody, Clearing & Settlement"),
+    ("Data",                            "Data"),
+    ("Infosec",                         "Infosec"),
+    ("Practice Management",             "Practice Management"),
+    ("Technology",                      "Technology"),
+    ("ALM",                             "ALM-Technology"),
+]
+
+
+def _compute_manual_defects_by_subdomain(data, sprints):
+    """{sub_domain: {Fatal, Serious, Medium, Low}} filtered by:
+       Sprint ∈ sprints, Type Of Defect == Manual, Sub Domain != TBD.
+    """
+    result = {}
+    sprint_set = set(sprints)
+    for r in data.get("defect_data", []):
+        if str(r.get("Sprint", "")).strip() not in sprint_set:
+            continue
+        if str(r.get("Type Of Defect", "")).strip().lower() != "manual":
+            continue
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
+            continue
+        if sub not in result:
+            result[sub] = {"Fatal": 0, "Serious": 0, "Medium": 0, "Low": 0}
+        result[sub]["Fatal"]   += _num(r.get("InSprint Fatel", 0))   + _num(r.get("Regression Fatel", 0))
+        result[sub]["Serious"] += _num(r.get("InSprint Serious", 0)) + _num(r.get("Regression Serious", 0))
+        result[sub]["Medium"]  += _num(r.get("InSprint Medium", 0))  + _num(r.get("Regression Medium", 0))
+        result[sub]["Low"]     += _num(r.get("InSprint Low", 0))     + _num(r.get("Regression Low", 0))
+    return result
 
 
 def _compute_defect_by_domain(data, defect_type=None):
@@ -470,294 +636,625 @@ def update_defect_slide(slide, data, chart_domain_map, label_domain_map):
                 _set_text_preserve_format(shape, f"{display} ({total})")
 
 
+def _update_defect_view_slide(slide, data, slide_config):
+    """Populate a Defect View slide (13 or 14).
+
+    For each (label, chart, sub_domain, display) row in slide_config:
+      - update the chart with [Fatal, Serious, Medium, Low] for that sub-domain
+        (filtered to the last 2 sprint cycles, Manual defects only, no TBD)
+      - update the label with '<display> (<total>)'
+
+    Also updates the slide title with the actual sprint range, e.g.
+    'Defect VIEW – Sprint 26.1.3 - Sprint 26.1.4'.
+    """
+    sprints = _last_two_sprint_cycles(data)
+    if not sprints:
+        return
+    defects = _compute_manual_defects_by_subdomain(data, sprints)
+
+    shape_map = {s.name: s for s in slide.shapes}
+
+    for label_name, chart_name, sub_domain, display in slide_config:
+        vals = defects.get(sub_domain, {"Fatal": 0, "Serious": 0, "Medium": 0, "Low": 0})
+        total = int(vals["Fatal"] + vals["Serious"] + vals["Medium"] + vals["Low"])
+
+        # Update label "<display> (<total>)"
+        if label_name in shape_map:
+            _set_text_preserve_format(shape_map[label_name], f"{display} ({total})")
+
+        # Update chart values
+        if chart_name in shape_map and shape_map[chart_name].has_chart:
+            chart = shape_map[chart_name].chart
+            try:
+                series_name = chart.plots[0].series[0].name or "Defect Metrics"
+            except Exception:
+                series_name = "Defect Metrics"
+            update_chart_data(chart, ["Fatal", "Serious", "Medium", "Low"], {
+                series_name: [
+                    int(vals["Fatal"]),
+                    int(vals["Serious"]),
+                    int(vals["Medium"]),
+                    int(vals["Low"]),
+                ],
+            })
+
+    # Update the slide title with the dynamic sprint range
+    sprint_range = (sprints[0] if len(sprints) == 1
+                    else f"{sprints[0]} - {sprints[1]}")
+    for s in slide.shapes:
+        if s.has_text_frame and "Defect VIEW" in s.text_frame.text:
+            _set_text_preserve_format(s, f"Defect VIEW – {sprint_range}")
+            break
+
+
 def update_slide_13(slide, data):
-    update_defect_slide(slide, data, DEFECT_SLIDE_13_DOMAINS, DEFECT_LABEL_13)
+    _update_defect_view_slide(slide, data, DEFECT_VIEW_SLIDE_13)
+    # Keep prior automation/extra logic out of slide 13 — only the per-sub-domain
+    # Manual defect mini-charts are populated, as requested.
 
 
 def update_slide_14(slide, data):
-    update_defect_slide(slide, data, DEFECT_SLIDE_14_DOMAINS, DEFECT_LABEL_14)
+    _update_defect_view_slide(slide, data, DEFECT_VIEW_SLIDE_14)
+
+    # Automation panel on slide 14 (Rectangle 17 + Chart 18):
+    # Sum 'Prod Defect Count' across rows where
+    #   Sprint is a monthly bucket (e.g. "January'26")  AND
+    #   Type Of Defect == Automation                    AND
+    #   Sub Domain != TBD
+    # grouped by Sub Domain. Chart categories are kept in the template's
+    # order; missing sub-domains are written as None (so empty bars hide).
+    auto_by_sub = _compute_automation_prod_defects(data)
+    shape_map = {s.name: s for s in slide.shapes}
+
+    if "Chart 18" in shape_map and shape_map["Chart 18"].has_chart:
+        chart = shape_map["Chart 18"].chart
+        try:
+            series_name = chart.plots[0].series[0].name or "Defect Metrics"
+        except Exception:
+            series_name = "Defect Metrics"
+        display_labels = [d for d, _ in AUTOMATION_CHART_LABELS]
+        values = []
+        for _, sub_key in AUTOMATION_CHART_LABELS:
+            v = int(auto_by_sub.get(sub_key, 0))
+            values.append(v if v > 0 else None)
+        update_chart_data(chart, display_labels, {series_name: values})
+
+    if "Rectangle 17" in shape_map:
+        total = int(sum(auto_by_sub.values()))
+        _set_text_preserve_format(shape_map["Rectangle 17"], f"Automation ({total})")
 
 
 # ==============================================================================
 # SLIDES 16-17: RAD Snapshot (RADEnabled)
 # ==============================================================================
 
-# Mapping: chart_name -> domain (based on spatial position in PPT)
-RAD_SLIDE_16 = {
-    "Chart 57": "ALM-Technology",          # top-right
-    "Chart 44": "Advisor Experience",      # top-middle (SRC)
-    "Chart 60": "Service and Support",     # top-left
-    "Chart 4": "Practice Management",      # bottom-left
-    "Chart 33": "Trading",                 # bottom-middle
-    "Chart 6": "Corporate Systems (TFG)",  # bottom-right
-}
-RAD_LABEL_16 = {
-    "TextBox 56": "ALM-Technology",
-    "TextBox 43": "Advisor Experience",
-    "TextBox 26": "Service and Support",
-    "TextBox 5": "Practice Management",
-    "TextBox 34": "Trading",
-    "TextBox 7": "Corporate Systems (TFG)",
-}
-RAD_SLIDE_17 = {
-    "Chart 60": "Custody, Clearing & Settlement",  # top-left
-    "Chart 44": "Data/Platform Modernization",      # top-middle
-    "Chart 57": "TMLB Muppets",                     # top-right (special team)
-    "Chart 8": "Home Office",                        # bottom-left
-    "Chart 10": "Infosec",                           # bottom-middle
-    "Chart 12": "Technology",                        # bottom-right
-}
-RAD_LABEL_17 = {
-    "TextBox 26": "Custody, Clearing & Settlement",
-    "TextBox 43": "Data/Platform Modernization",
-    "TextBox 56": "TMLB Muppets",
-    "TextBox 2": "Home Office",
-    "TextBox 9": "Infosec",
-    "TextBox 11": "Technology",
-}
+# Panel config for each RAD slide:
+#   (label_shape, chart_shape, lookup_key, display_label, by_team)
+# When by_team is False the key is a Sub Domain (Excel 'Sub Domain' column).
+# When by_team is True the key is a Scrum Team Name (used only for special
+# team-level panels such as 'TMLB Muppets' whose Sub Domain is blank).
+RAD_SLIDE_16_PANELS = [
+    ("TextBox 26", "Chart 60", "Service and Support",     "Service and Support",     False),
+    ("TextBox 43", "Chart 44", "SRC",                     "SRC",                     False),
+    ("TextBox 56", "Chart 57", "ALM-Technology",          "ALM-Technology",          False),
+    ("TextBox 5",  "Chart 4",  "Practice Management",     "Practice Management",     False),
+    ("TextBox 34", "Chart 33", "Trading",                 "Trading",                 False),
+    ("TextBox 7",  "Chart 6",  "Corporate Systems(TFG)",  "Corporate Systems(TFG)",  False),
+]
+RAD_SLIDE_17_PANELS = [
+    ("TextBox 26", "Chart 60", "Custody, Clearing & Settlement", "Custody, Clearing & Settlement", False),
+    ("TextBox 43", "Chart 44", "Data",                            "Data",                           False),
+    ("TextBox 56", "Chart 57", "TMLB Muppets",                    "TMLB Muppets",                   True),
+    ("TextBox 2",  "Chart 8",  "Home Office",                     "Home Office",                   False),
+    ("TextBox 9",  "Chart 10", "Infosec",                         "Infosec",                       False),
+    ("TextBox 11", "Chart 12", "Technology",                      "Technology",                    False),
+]
 
 
-def _compute_rad_by_domain(data):
-    """Compute RAD data grouped by domain/sub-domain."""
-    result = {}
+def _compute_rad_by_subdomain(data):
+    """Group RADEnabled rows by Sub Domain (skipping TBD / blank Sub Domain).
+
+    Returns {sub_domain: {isolated, qa_pull, rad_enabled, in_progress}} where:
+      isolated     = sum(Independent Build #)
+      qa_pull      = sum(# Builds QA Pull Enabled)
+      rad_enabled  = sum(# Builds RAD Enabled)
+      in_progress  = max(0, qa_pull - rad_enabled)
+    """
+    by_sub = {}
     for r in data.get("rad_enabled", []):
-        domain = str(r.get("Domain", "Unknown"))
-        sub = str(r.get("Sub Domain", ""))
-        key = sub if sub else domain
-        if key not in result:
-            result[key] = {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
-        result[key]["isolated"] += _num(r.get("Independent Build #", 0)) + _num(r.get("Shared Build #", 0))
-        result[key]["qa_pull"] += _num(r.get("# Builds QA Pull Enabled", 0))
-        result[key]["rad_enabled"] += _num(r.get("# Builds RAD Enabled", 0))
-        elig = _num(r.get("RAD Eligible build from Independent Build", 0)) + _num(r.get("RAD Eligible build from Shared build", 0))
-        result[key]["in_progress"] += max(0, _num(r.get("# Builds QA Pull Enabled", 0)) - _num(r.get("# Builds RAD Enabled", 0)))
-
-    # Also aggregate by domain
-    domain_result = {}
-    for r in data.get("rad_enabled", []):
-        domain = str(r.get("Domain", "Unknown"))
-        if domain not in domain_result:
-            domain_result[domain] = {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
-        domain_result[domain]["isolated"] += _num(r.get("Independent Build #", 0)) + _num(r.get("Shared Build #", 0))
-        domain_result[domain]["qa_pull"] += _num(r.get("# Builds QA Pull Enabled", 0))
-        domain_result[domain]["rad_enabled"] += _num(r.get("# Builds RAD Enabled", 0))
-        domain_result[domain]["in_progress"] += max(0, _num(r.get("# Builds QA Pull Enabled", 0)) - _num(r.get("# Builds RAD Enabled", 0)))
-
-    # Merge both
-    domain_result.update(result)
-    return domain_result
-
-
-def _find_rad_data(rad_data, ppt_domain):
-    for key, vals in rad_data.items():
-        if _domain_match(key, ppt_domain) or ppt_domain.lower() in key.lower() or key.lower() in ppt_domain.lower():
-            return vals
-    return {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
-
-
-def update_rad_slide(slide, data, chart_map, label_map):
-    rad_data = _compute_rad_by_domain(data)
-    charts = _get_charts_by_name(slide)
-
-    for chart_name, ppt_domain in chart_map.items():
-        if chart_name not in charts:
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
             continue
-        chart = charts[chart_name].chart
-        vals = _find_rad_data(rad_data, ppt_domain)
-        cats = ["Isolated Build", "QA Pull Approved", "RAD Enable ", "RAD Enablement In-Progress"]
-        update_chart_data(chart, cats,
-                          {"Series 1": [vals["isolated"], vals["qa_pull"], vals["rad_enabled"], vals["in_progress"]]})
+        if sub not in by_sub:
+            by_sub[sub] = {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
+        by_sub[sub]["isolated"]    += _num(r.get("Independent Build #", 0))
+        by_sub[sub]["qa_pull"]     += _num(r.get("# Builds QA Pull Enabled", 0))
+        by_sub[sub]["rad_enabled"] += _num(r.get("# Builds RAD Enabled", 0))
+    # In-progress is QA Pull minus RAD Enabled (floored at 0)
+    for v in by_sub.values():
+        v["in_progress"] = max(0, v["qa_pull"] - v["rad_enabled"])
+    return by_sub
 
-    # Update labels with percentage
-    for shape_name, text, shape in _get_text_shapes(slide):
-        if shape_name in label_map:
-            ppt_domain = label_map[shape_name]
-            vals = _find_rad_data(rad_data, ppt_domain)
+
+def _compute_rad_by_team(data):
+    """Per-team RAD aggregates — used for special team-level panels
+    (e.g. 'TMLB Muppets' whose Sub Domain is blank in the source data).
+    """
+    by_team = {}
+    for r in data.get("rad_enabled", []):
+        team = str(r.get("Scrum Team Name", "")).strip()
+        if not team:
+            continue
+        if team not in by_team:
+            by_team[team] = {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
+        by_team[team]["isolated"]    += _num(r.get("Independent Build #", 0))
+        by_team[team]["qa_pull"]     += _num(r.get("# Builds QA Pull Enabled", 0))
+        by_team[team]["rad_enabled"] += _num(r.get("# Builds RAD Enabled", 0))
+    for v in by_team.values():
+        v["in_progress"] = max(0, v["qa_pull"] - v["rad_enabled"])
+    return by_team
+
+
+def _update_rad_slide(slide, data, panels):
+    """Populate one RAD Snapshot slide given its panel config."""
+    rad_sub = _compute_rad_by_subdomain(data)
+    rad_team = _compute_rad_by_team(data)
+    shape_map = {s.name: s for s in slide.shapes}
+
+    cats = ["Isolated Build", "QA Pull Approved", "RAD Enable ", "RAD Enablement In-Progress"]
+
+    for label_name, chart_name, key, display, by_team in panels:
+        vals = rad_team.get(key) if by_team else rad_sub.get(key)
+        vals = vals or {"isolated": 0, "qa_pull": 0, "rad_enabled": 0, "in_progress": 0}
+
+        # Chart
+        if chart_name in shape_map and shape_map[chart_name].has_chart:
+            chart = shape_map[chart_name].chart
+            try:
+                series_name = chart.plots[0].series[0].name or "Series 1"
+            except Exception:
+                series_name = "Series 1"
+            update_chart_data(chart, cats, {series_name: [
+                int(vals["isolated"]),
+                int(vals["qa_pull"]),
+                int(vals["rad_enabled"]),
+                int(vals["in_progress"]),
+            ]})
+
+        # Label with percentage = RAD Enabled / Independent Build
+        if label_name in shape_map:
             pct = round(vals["rad_enabled"] / vals["isolated"] * 100) if vals["isolated"] else 0
-            display = ppt_domain.replace("Advisor Experience", "SRC").replace("Data/Platform Modernization", "Data")
-            _set_text_preserve_format(shape, f"{display} ~ {pct} % RAD Enabled")
+            _set_text_preserve_format(shape_map[label_name], f"{display} ~ {pct} % RAD Enabled")
+
+
+# ==============================================================================
+# SLIDE 15: Production & Post-Production Defect View
+#   Source: DefectData, monthly buckets only (Sprint != 'Sprint X.Y.Z'),
+#           Type Of Defect in {Manual, Automation}, Sub Domain != TBD,
+#           Prod Defect Count > 0.
+#   Chart 12 = Domain Wise Defects (per-Sub Domain share of total Prod Defects)
+#   Title    = "PRODUCTION & Post-production Defect View – <months>"
+# ==============================================================================
+
+# Maps the Chart 12 category labels (as they appear in the template) to the
+# Excel Sub Domain values.
+SLIDE_15_DOMAIN_LABELS = [
+    ("ALM-Technology",                   "ALM-Technology"),
+    ("Corporate Systems (TFG)",          "Corporate Systems(TFG)"),
+    ("Custody, Cleaning & Settlements",  "Custody, Clearing & Settlement"),
+    ("Data",                             "Data"),
+    ("Infosec",                          "Infosec"),
+    ("Practice Management",              "Practice Management"),
+    ("Service and Support",              "Service and Support"),
+    ("SRC",                              "SRC"),
+    ("Technology",                       "Technology"),
+    ("Trading",                          "Trading"),
+]
+
+# Short-form month names used in the dynamic title
+_MONTH_SHORT = {
+    "january": "Jan", "february": "Feb", "march": "Mar", "april": "Apr",
+    "may": "May", "june": "Jun", "july": "Jul", "august": "Aug",
+    "september": "Sep", "october": "Oct", "november": "Nov", "december": "Dec",
+}
+
+
+def _prod_defects_by_subdomain(data):
+    """{sub_domain: prod_defect_count_total} for slide 15.
+
+    Filters:
+      Sprint is a monthly bucket (NOT 'Sprint X.Y.Z'),
+      Type Of Defect in {Manual, Automation},
+      Sub Domain != TBD.
+    """
+    result = {}
+    for r in data.get("defect_data", []):
+        s = str(r.get("Sprint", "")).strip()
+        if not s or s.startswith("Sprint "):
+            continue
+        t = str(r.get("Type Of Defect", "")).strip().lower()
+        if t not in ("manual", "automation"):
+            continue
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
+            continue
+        result[sub] = result.get(sub, 0) + _num(r.get("Prod Defect Count", 0))
+    return result
+
+
+def _monthly_buckets_in_data(data):
+    """Return monthly Sprint values in encounter order, e.g. [\"January'26\", \"February'26\"]."""
+    seen = []
+    for r in data.get("defect_data", []):
+        s = str(r.get("Sprint", "")).strip()
+        if not s or s.startswith("Sprint "):
+            continue
+        if s not in seen:
+            seen.append(s)
+    # Sort by (year, month-index) so display order is chronological regardless of row order
+    def _key(b):
+        # Format like "February'26"
+        try:
+            name, yr = b.split("'")
+            return (int(yr), list(_MONTH_SHORT.keys()).index(name.strip().lower()))
+        except Exception:
+            return (9999, 99)
+    return sorted(seen, key=_key)
+
+
+def _format_month_range(monthly_buckets):
+    """Format a list of monthly bucket values into a short title, e.g. \"Jan & Feb'26\"."""
+    if not monthly_buckets:
+        return ""
+    parts = []
+    year = None
+    for b in monthly_buckets:
+        try:
+            name, yr = b.split("'")
+            short = _MONTH_SHORT.get(name.strip().lower(), name.strip()[:3])
+            parts.append(short)
+            year = yr
+        except Exception:
+            parts.append(b)
+    if year:
+        return f"{' & '.join(parts)}'{year}"
+    return " & ".join(parts)
+
+
+def _qa_miss_split(data):
+    """Return (qa_miss_total, not_qa_miss_total) summed over Prod Defect Count.
+
+    A row is QA Miss iff its 'Prod Defect RCA' text contains the literal
+    substring 'qa miss' (case-insensitive); otherwise Not QA Miss.
+    Same row filters as Chart 12: monthly bucket, Manual or Automation,
+    Sub Domain != TBD.
+    """
+    qa = 0
+    not_qa = 0
+    for r in data.get("defect_data", []):
+        s = str(r.get("Sprint", "")).strip()
+        if not s or s.startswith("Sprint "):
+            continue
+        t = str(r.get("Type Of Defect", "")).strip().lower()
+        if t not in ("manual", "automation"):
+            continue
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
+            continue
+        count = _num(r.get("Prod Defect Count", 0))
+        if count <= 0:
+            continue
+        rca = str(r.get("Prod Defect RCA", "") or "").strip().lower()
+        if "qa miss" in rca:
+            qa += count
+        else:
+            not_qa += count
+    return qa, not_qa
+
+
+def update_slide_15(slide, data):
+    """Update Slide 15 (Production & Post-production Defect View)."""
+    totals = _prod_defects_by_subdomain(data)
+    grand = sum(totals.values())
+
+    shape_map = {s.name: s for s in slide.shapes}
+
+    # Chart 12 — Domain Wise Defects (proportions of grand total)
+    if "Chart 12" in shape_map and shape_map["Chart 12"].has_chart:
+        chart = shape_map["Chart 12"].chart
+        try:
+            series_name = chart.plots[0].series[0].name or "Domain Wise Defects"
+        except Exception:
+            series_name = "Domain Wise Defects"
+        display_labels = [d for d, _ in SLIDE_15_DOMAIN_LABELS]
+        values = []
+        for _, sub_key in SLIDE_15_DOMAIN_LABELS:
+            v = totals.get(sub_key, 0)
+            values.append((v / grand) if grand > 0 else 0)
+        update_chart_data(chart, display_labels, {series_name: values})
+
+    # Chart 13 — QA Miss vs Not QA Miss distribution (by Prod Defect Count)
+    if "Chart 13" in shape_map and shape_map["Chart 13"].has_chart:
+        chart = shape_map["Chart 13"].chart
+        try:
+            series_name = chart.plots[0].series[0].name or "QA Miss Distribution"
+        except Exception:
+            series_name = "QA Miss Distribution"
+        qa, not_qa = _qa_miss_split(data)
+        tot = qa + not_qa
+        if tot > 0:
+            update_chart_data(chart, ["QA Miss", "Not QA Miss"],
+                              {series_name: [qa / tot, not_qa / tot]})
+        else:
+            update_chart_data(chart, ["QA Miss", "Not QA Miss"],
+                              {series_name: [0, 0]})
+
+    # Title — replace month range portion dynamically
+    months = _monthly_buckets_in_data(data)
+    month_range = _format_month_range(months)
+    if month_range:
+        for s in slide.shapes:
+            if s.has_text_frame and "PRODUCTION" in s.text_frame.text.upper() and "DEFECT" in s.text_frame.text.upper():
+                _set_text_preserve_format(s, f"PRODUCTION & Post-production Defect View – {month_range}")
+                break
 
 
 def update_slide_16(slide, data):
-    update_rad_slide(slide, data, RAD_SLIDE_16, RAD_LABEL_16)
+    _update_rad_slide(slide, data, RAD_SLIDE_16_PANELS)
 
 
 def update_slide_17(slide, data):
-    update_rad_slide(slide, data, RAD_SLIDE_17, RAD_LABEL_17)
+    _update_rad_slide(slide, data, RAD_SLIDE_17_PANELS)
 
 
 # ==============================================================================
 # SLIDES 18-19: Primary Release Automation (ReleaseDayTestCaseSheet)
 # ==============================================================================
 
-RELEASE_SLIDE_18 = {
-    "Chart 4": "ALM-Technology",
-    "Chart 10": "Corporate Systems (TFG)",
-    "Chart 15": "Custody, Clearing & Settlement",
-    "Chart 16": "Data/Platform Modernization",
-    "Chart 18": "Infosec",
-    "Chart 24": "Practice Management",
-}
-RELEASE_SLIDE_19 = {
-    "Chart 4": "Service and Support",
-    "Chart 10": "Advisor Experience",  # SRC
-    "Chart 15": "Technology",
-    "Chart 16": "Trading",
-}
+# Per-panel config for the Primary Release Automation slides:
+#   (label_shape, chart_shape, sub_domain_key, display_label)
+RELEASE_SLIDE_18_PANELS = [
+    ("TextBox 26", "Chart 4",  "ALM-Technology",                 "ALM-Technology"),
+    ("TextBox 27", "Chart 10", "Corporate Systems(TFG)",         "Corporate Systems(TFG)"),
+    ("TextBox 28", "Chart 15", "Custody, Clearing & Settlement", "Custody, Clearing & Settlement"),
+    ("TextBox 29", "Chart 16", "Data",                           "Data"),
+    ("TextBox 30", "Chart 18", "Infosec",                        "Infosec"),
+    ("TextBox 31", "Chart 24", "Practice Management",            "Practice Management"),
+]
+RELEASE_SLIDE_19_PANELS = [
+    ("TextBox 26", "Chart 4",  "SRC",                 "SRC"),
+    ("TextBox 27", "Chart 10", "Service and Support", "Service and Support"),
+    ("TextBox 28", "Chart 15", "Technology",          "Technology"),
+    ("TextBox 29", "Chart 16", "Trading",             "Trading"),
+]
 
 
-def _compute_release_by_domain(data):
-    """Compute release data by domain, using latest month only."""
+def _compute_release_by_subdomain(data):
+    """{sub_domain: {stories, feasible, automated}} from ReleaseDayTestCaseSheet.
+
+    Sums across all rows of each Sub Domain (skipping TBD / blank).
+    """
     result = {}
     for r in data.get("release_day", []):
-        domain = str(r.get("Domain", "Unknown"))
-        if domain not in result:
-            result[domain] = {"stories": 0, "feasible": 0, "automated": 0}
-        result[domain]["stories"] += _num(r.get("No Of Stories part of the Release", 0))
-        result[domain]["feasible"] += _num(r.get("No of Automation feasible TCs", 0))
-        result[domain]["automated"] += _num(r.get("No of TCs Automated", 0))
+        sub = str(r.get("Sub Domain", "")).strip()
+        if not sub or sub == "TBD":
+            continue
+        if sub not in result:
+            result[sub] = {"stories": 0, "feasible": 0, "automated": 0}
+        result[sub]["stories"]   += _num(r.get("No Of Stories part of the Release", 0))
+        result[sub]["feasible"]  += _num(r.get("No of Automation feasible TCs", 0))
+        result[sub]["automated"] += _num(r.get("No of TCs Automated", 0))
     return result
 
 
-def _find_release_data(release_data, ppt_domain):
-    for key, vals in release_data.items():
-        if _domain_match(key, ppt_domain):
-            return vals
-    return {"stories": 0, "feasible": 0, "automated": 0}
+def _format_release_label(display, pct):
+    """Format the per-panel percentage label, matching the template's style."""
+    if display is None:
+        return None
+    if pct <= 0:
+        return f"{display} ~ 0% stories automated"
+    if pct >= 99.5:
+        return f"{display} ~ 100% stories automated"
+    return f"{display} ~ {pct:.1f}% stories automated"
 
 
-def update_release_slide(slide, data, chart_map):
-    release_data = _compute_release_by_domain(data)
-    charts = _get_charts_by_name(slide)
+def _update_release_slide(slide, data, panels):
+    """Populate one Primary Release Automation slide using its panel config.
 
-    # Track label updates: TextBox 26-31 are the percentage labels
-    label_updates = {}
-    chart_positions = []
+    For each panel:
+      - chart series = [Story Volume, Automation Feasible TCs, Automated TCs]
+        (sums across all rows of the panel's Sub Domain in ReleaseDayTestCaseSheet)
+      - label = '<Sub Domain> ~ <Automated/Feasible×100>% stories automated'
+    """
+    release_data = _compute_release_by_subdomain(data)
+    shape_map = {s.name: s for s in slide.shapes}
+    cats = ["Story Volume", "Automation Feasible TCs", "Automated TCs"]
 
-    for chart_name, ppt_domain in chart_map.items():
-        if chart_name not in charts:
-            continue
-        chart_shape = charts[chart_name]
-        chart = chart_shape.chart
-        vals = _find_release_data(release_data, ppt_domain)
-        cats = ["Story Volume", "Automation Feasible TCs", "Automated TCs"]
-        update_chart_data(chart, cats,
-                          {"Series 1": [vals["stories"], vals["feasible"], vals["automated"]]})
+    for label_name, chart_name, sub_key, display in panels:
+        vals = release_data.get(sub_key, {"stories": 0, "feasible": 0, "automated": 0})
 
-        # Compute percentage for label
-        pct = round(vals["automated"] / vals["feasible"] * 100, 1) if vals["feasible"] else 0
-        chart_positions.append((chart_shape.top, pct))
+        # Chart
+        if chart_name in shape_map and shape_map[chart_name].has_chart:
+            chart = shape_map[chart_name].chart
+            try:
+                series_name = chart.plots[0].series[0].name or "Series 1"
+            except Exception:
+                series_name = "Series 1"
+            update_chart_data(chart, cats, {series_name: [
+                int(vals["stories"]),
+                int(vals["feasible"]),
+                int(vals["automated"]),
+            ]})
 
-    # Update percentage text labels (sorted by position to match chart order)
-    chart_positions.sort(key=lambda x: x[0])
-    pct_labels = []
-    for name, text, shape in _get_text_shapes(slide):
-        if "automated" in text.lower() and "%" in text:
-            pct_labels.append((shape.top, shape))
-
-    pct_labels.sort(key=lambda x: x[0])
-    for i, (_, pct) in enumerate(chart_positions):
-        if i < len(pct_labels):
-            _, shape = pct_labels[i]
-            if pct == 0:
-                _set_text_preserve_format(shape, "0% stories automated")
-            elif pct >= 99.5:
-                _set_text_preserve_format(shape, "100% stories automated")
-            else:
-                _set_text_preserve_format(shape, f"~ {pct}% stories automated")
+        # Label (skip blank panels)
+        if label_name in shape_map and display is not None:
+            pct = round(vals["automated"] / vals["feasible"] * 100, 1) if vals["feasible"] else 0
+            _set_text_preserve_format(shape_map[label_name], _format_release_label(display, pct))
 
 
 def update_slide_18(slide, data):
-    update_release_slide(slide, data, RELEASE_SLIDE_18)
+    _update_release_slide(slide, data, RELEASE_SLIDE_18_PANELS)
 
 
 def update_slide_19(slide, data):
-    update_release_slide(slide, data, RELEASE_SLIDE_19)
+    _update_release_slide(slide, data, RELEASE_SLIDE_19_PANELS)
 
 
 # ==============================================================================
 # SLIDES 20-21: Regression Automation Trend (TCsDetailsSheet)
 # ==============================================================================
 
-TREND_SLIDE_20 = {
-    "Chart 20": "ALM-Technology",
-    "Chart 15": "Corporate Systems (TFG)",
-    "Chart 14": "Custody, Clearing & Settlement",
-    "Chart 21": "Data/Platform Modernization",
-    "Chart 22": "Infosec",
-    "Chart 23": "Practice Management",
-    "Chart 24": "Service and Support",
-}
-TREND_SLIDE_21 = {
-    "Chart 12": "Advisor Experience",  # SRC
-    "Chart 16": "Technology",
-    "Chart 14": "Trading",
-}
+# Panel config: (chart_name, sub_domain_key). One panel per Sub Domain.
+TREND_SLIDE_20_PANELS = [
+    ("Chart 14", "ALM-Technology"),
+    ("Chart 15", "Corporate Systems(TFG)"),
+    ("Chart 20", "Custody, Clearing & Settlement"),
+    ("Chart 21", "Data"),
+    ("Chart 22", "Infosec"),
+    ("Chart 23", "Practice Management"),
+    ("Chart 24", "Service and Support"),
+]
+TREND_SLIDE_21_PANELS = [
+    ("Chart 12", "SRC"),
+    ("Chart 16", "Technology"),
+    ("Chart 14", "Trading"),
+]
+
+_MONTH_ABBR_UPPER = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 
-def _compute_regression_trend(data):
-    """Compute automatable vs automated by domain from TCsDetailsSheet."""
+def _detect_latest_month_abbr(data):
+    """Return uppercase 3-letter abbreviation of the latest month found in
+    TCsDetailsSheet's 'Submitted On' column (e.g. 'MAR'). None if unparseable.
+    """
+    import re
+    latest = (0, 0)
+    for r in data.get("tcs_details", []):
+        so = str(r.get("Submitted On", "")).strip()
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", so)  # M/D/YYYY
+        if m:
+            mo, yr = int(m.group(1)), int(m.group(3))
+        else:
+            m = re.match(r"(\d{4})-(\d{2})-(\d{2})", so)  # YYYY-MM-DD
+            if not m:
+                continue
+            yr, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12 and (yr, mo) > latest:
+            latest = (yr, mo)
+    if latest == (0, 0):
+        return None
+    return _MONTH_ABBR_UPPER[latest[1] - 1]
+
+
+def _build_team_subdomain_lookup(data):
+    """{lower-case scrum team name: sub_domain} built from ProjectDetails."""
+    lookup = {}
+    for r in data.get("project_details", []):
+        team = str(r.get("Scrum Team Name", "")).strip().lower()
+        sub = str(r.get("Sub Domain", "")).strip()
+        if team and sub and sub != "TBD":
+            lookup[team] = sub
+    return lookup
+
+
+def _compute_regression_by_subdomain(data):
+    """{sub_domain: {automatable, automated}} from TCsDetailsSheet.
+
+    Each TCsDetailsSheet row is mapped to a Sub Domain via the Scrum Team Name
+    looked up in ProjectDetails. Rows whose team is not in ProjectDetails (or
+    whose ProjectDetails Sub Domain is blank / TBD) are skipped.
+    """
+    team_lookup = _build_team_subdomain_lookup(data)
     result = {}
     for r in data.get("tcs_details", []):
-        domain = str(r.get("Domain", "Unknown"))
-        if domain not in result:
-            result[domain] = {"automatable": 0, "automated": 0}
+        team = str(r.get("Scrum Team Name", "")).strip().lower()
+        sub = team_lookup.get(team)
+        if not sub:
+            continue
+        if sub not in result:
+            result[sub] = {"automatable": 0, "automated": 0}
         for p in ["P0", "P1", "P2", "P3", "P4"]:
-            result[domain]["automatable"] += _num(r.get(f"Total TCs Feasible {p}", 0))
-            result[domain]["automated"] += _num(r.get(f"Total TCs Automated {p}", 0))
+            result[sub]["automatable"] += _num(r.get(f"Total TCs Feasible {p}", 0))
+            result[sub]["automated"]   += _num(r.get(f"Total TCs Automated {p}", 0))
     return result
 
 
-def _find_trend_data(trend_data, ppt_domain):
-    for key, vals in trend_data.items():
-        if _domain_match(key, ppt_domain):
-            return vals
-    return {"automatable": 0, "automated": 0}
+def _update_trend_slide(slide, data, panels):
+    """Populate one Regression Automation Trend slide.
 
+    For each panel, the chart's existing categories (e.g. ['JAN', 'FEB']) and
+    historical series values are preserved. The current Excel's totals are
+    written into the latest-month column:
+      - If the latest month already exists as a category, that column is replaced.
+      - Otherwise the latest month is appended as a NEW column.
+    """
+    totals = _compute_regression_by_subdomain(data)
+    latest = _detect_latest_month_abbr(data) or ""
+    shape_map = {s.name: s for s in slide.shapes}
 
-def update_trend_slide(slide, data, chart_map):
-    trend_data = _compute_regression_trend(data)
-    charts = _get_charts_by_name(slide)
-
-    for chart_name, ppt_domain in chart_map.items():
-        if chart_name not in charts:
+    for chart_name, sub_key in panels:
+        if chart_name not in shape_map or not shape_map[chart_name].has_chart:
             continue
-        chart = charts[chart_name].chart
-        vals = _find_trend_data(trend_data, ppt_domain)
+        chart = shape_map[chart_name].chart
+        vals = totals.get(sub_key, {"automatable": 0, "automated": 0})
 
-        # The trend charts have JAN/FEB months - we put current data in the latest month
-        # Keep existing first month data, update second month
+        # Capture existing chart structure
         existing_cats = [str(c) for c in chart.plots[0].categories]
-        if len(existing_cats) >= 2:
-            # Try to read existing first-month data
-            try:
-                old_automatable = list(chart.plots[0].series[0].values)[0]
-                old_automated = list(chart.plots[0].series[1].values)[0]
-                if old_automatable is None:
-                    old_automatable = 0
-                if old_automated is None:
-                    old_automated = 0
-            except (IndexError, TypeError):
-                old_automatable = 0
-                old_automated = 0
+        try:
+            series_list = list(chart.plots[0].series)
+            automatable_name = (series_list[0].name if series_list else None) or "Automatable"
+            automated_name = (series_list[1].name if len(series_list) > 1 else None) or "Automated"
+            old_automatable = [(v if v is not None else 0) for v in (list(series_list[0].values) if series_list else [])]
+            old_automated = [(v if v is not None else 0) for v in (list(series_list[1].values) if len(series_list) > 1 else [])]
+        except Exception:
+            automatable_name, automated_name = "Automatable", "Automated"
+            old_automatable, old_automated = [], []
+        # Pad to category length
+        while len(old_automatable) < len(existing_cats):
+            old_automatable.append(0)
+        while len(old_automated) < len(existing_cats):
+            old_automated.append(0)
 
-            update_chart_data(chart, existing_cats, {
-                "Automatable": [old_automatable, vals["automatable"]],
-                "Automated": [old_automated, vals["automated"]],
-            })
+        new_aut = int(vals["automatable"])
+        new_done = int(vals["automated"])
+
+        if not latest:
+            # No latest month detected — leave chart untouched
+            continue
+
+        if latest in existing_cats:
+            # The latest month already exists as a column — update ONLY its
+            # values (older columns stay as preserved historical data).
+            idx = existing_cats.index(latest)
+            new_cats = list(existing_cats)
+            new_automatable = list(old_automatable); new_automatable[idx] = new_aut
+            new_automated   = list(old_automated);   new_automated[idx]   = new_done
         else:
-            update_chart_data(chart, ["Current"], {
-                "Automatable": [vals["automatable"]],
-                "Automated": [vals["automated"]],
-            })
+            # Roll the trend forward: keep the last 2 historical columns and
+            # append the latest month as the 3rd. Older columns are dropped.
+            new_cats = (existing_cats + [latest])[-3:]
+            new_automatable = (list(old_automatable) + [new_aut])[-3:]
+            new_automated   = (list(old_automated)   + [new_done])[-3:]
+
+        # Always trim to at most 3 months — the chart is a 3-month rolling view.
+        if len(new_cats) > 3:
+            new_cats = new_cats[-3:]
+            new_automatable = new_automatable[-3:]
+            new_automated   = new_automated[-3:]
+
+        update_chart_data(chart, new_cats, {
+            automatable_name: new_automatable,
+            automated_name:   new_automated,
+        })
 
 
 def update_slide_20(slide, data):
-    update_trend_slide(slide, data, TREND_SLIDE_20)
+    _update_trend_slide(slide, data, TREND_SLIDE_20_PANELS)
 
 
 def update_slide_21(slide, data):
-    update_trend_slide(slide, data, TREND_SLIDE_21)
+    _update_trend_slide(slide, data, TREND_SLIDE_21_PANELS)
 
 
 # ==============================================================================
@@ -1013,6 +1510,7 @@ SLIDE_UPDATERS = {
     12: update_slide_12,
     13: update_slide_13,
     14: update_slide_14,
+    15: update_slide_15,
     16: update_slide_16,
     17: update_slide_17,
     18: update_slide_18,

@@ -566,6 +566,7 @@ async function generatePPT() {
     if (statusEl) statusEl.textContent = `Generating ${selected.length} slides...`;
 
     try {
+        // 1. Download the populated PPT
         const res = await fetch("/api/generate-ppt", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -579,7 +580,26 @@ async function generatePPT() {
         a.download = "LPL_QE_Connect_Generated.pptx";
         a.click();
         URL.revokeObjectURL(url);
-        if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)">PPT with ${selected.length} slides downloaded!</span>`;
+
+        // 2. Also download the calculation report PDF.
+        // Don't block PPT success on PDF failure — best effort.
+        try {
+            const pdfRes = await fetch("/api/generate-report-pdf", { method: "POST" });
+            if (pdfRes.ok) {
+                const pdfBlob = await pdfRes.blob();
+                const pdfUrl = URL.createObjectURL(pdfBlob);
+                const a2 = document.createElement("a");
+                a2.href = pdfUrl;
+                a2.download = "LPL_QE_Calculation_Report.pdf";
+                a2.click();
+                URL.revokeObjectURL(pdfUrl);
+                if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)">PPT + Calculation Report downloaded.</span>`;
+            } else {
+                if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)">PPT downloaded.</span> <span style="color:var(--danger)">Report PDF failed.</span>`;
+            }
+        } catch (pdfErr) {
+            if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)">PPT downloaded.</span> <span style="color:var(--danger)">Report PDF error: ${pdfErr.message}</span>`;
+        }
     } catch (err) {
         if (statusEl) statusEl.innerHTML = '<span style="color:var(--danger)">Error: ' + err.message + '</span>';
     }

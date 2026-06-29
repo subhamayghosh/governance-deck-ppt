@@ -2,3 +2,4 @@ Flask>=3.0,<4.0
 pandas>=2.0,<3.0
 openpyxl>=3.1,<4.0
 python-pptx>=0.6.21,<2.0
+reportlab>=4.0,<6.0

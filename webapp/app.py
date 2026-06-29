@@ -7,6 +7,7 @@ import pandas as pd
 from pptx import Presentation
 from werkzeug.utils import secure_filename
 from slide_updaters import update_presentation
+from calc_report import build_calculation_pdf
 
 app = Flask(__name__)
 
@@ -433,6 +434,31 @@ def generate_ppt():
         mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         as_attachment=True,
         download_name=f"LPL_QE_Connect_Generated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx",
+    )
+
+
+@app.route("/api/generate-report-pdf", methods=["POST", "GET"])
+def generate_report_pdf():
+    """Return a PDF documenting how every automated slide was calculated."""
+    if not os.path.exists(active_files.get("excel", "")):
+        return jsonify({
+            "error": "Please upload the Excel workbook before generating the report.",
+        }), 400
+    try:
+        data = read_excel_data()
+        pdf_bytes = build_calculation_pdf(
+            data,
+            excel_name=active_files.get("excel_name", ""),
+            pptx_name=active_files.get("pptx_name", ""),
+        )
+    except Exception as e:
+        return jsonify({"error": f"PDF generation failed: {e}"}), 500
+
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"LPL_QE_Calculation_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
     )
 
 

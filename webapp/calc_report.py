@@ -168,48 +168,46 @@ def _section_slide_11(data, st):
 
 
 def _section_slide_12(data, st):
+    from slide_updaters import _classify_insprint_teams
     flow = [Paragraph("Slide 12 · Automation Snapshot", st["h1"])]
     flow.append(Paragraph(
         "<b>Source:</b> <i>InSprintData</i>. "
-        "<b>Rule for <i>&lt;70 %</i> and <i>&gt;70 %</i> In-Sprint bars:</b> "
-        "Restrict to the last two sprint cycles found in InSprintData "
-        "(numeric sort on Sprint name). For each unique <i>Scrum team</i>, "
-        "take its <b>best</b> (maximum) <i>Automation coverage</i>. "
-        "Count teams whose best ≥ 70 (→ &gt;70 % In-Sprint) vs &lt; 70 "
-        "(→ &lt;70 % In-Sprint). The other three bars (No Automation, "
-        "Script Maintainance, Tech-Debt Automation) are left at template values.",
+        "<b>Rule:</b> restrict to the last 2 sprint cycles in InSprintData "
+        "(numeric sort on Sprint name). For each unique <i>Scrum team</i> "
+        "aggregate across those rows: MaxCov = max(<i>Automation coverage</i>); "
+        "Σ TD = sum(<i>Auto tech debt P0..P4</i>); Σ Maint = sum(<i>TCs Maintained</i>). "
+        "Classify (first match wins): MaxCov ≥ 70 → <b>&gt;70 % In-Sprint</b>; "
+        "0 &lt; MaxCov &lt; 70 → <b>&lt;70 % In-Sprint</b>; MaxCov = 0 and Σ TD &gt; 0 "
+        "→ <b>Tech-Debt Automation</b>; MaxCov = 0 and Σ TD = 0 and Σ Maint &gt; 0 "
+        "→ <b>Script Maintainance</b>; otherwise → <b>No Automation</b>. "
+        "The reason table lists <i>No Automation</i> teams grouped by their "
+        "<i>Comment (If Automation Cov is 0%)</i> value.",
         st["rule"]))
-    insp = data.get("insprint_data", [])
-    sprint_col = None
-    if insp:
-        for k in insp[0].keys():
-            if str(k).strip().lower() == "sprint":
-                sprint_col = k; break
-    sprint_col = sprint_col or "Sprint  "
-    sprints = sorted(
-        {str(r.get(sprint_col, "")).strip() for r in insp
-         if str(r.get(sprint_col, "")).strip().startswith("Sprint ")},
-        key=_sprint_sort_key)[-2:]
-    team_best = {}
-    for r in insp:
-        if str(r.get(sprint_col, "")).strip() not in sprints:
-            continue
-        team = str(r.get("Scrum team", "")).strip()
-        if not team:
-            continue
-        pct = _automation_coverage_pct(r.get("Automation coverage"))
-        if pct is None:
-            continue
-        if team not in team_best or pct > team_best[team]:
-            team_best[team] = pct
-    above = sum(1 for v in team_best.values() if v >= 70)
-    below = sum(1 for v in team_best.values() if v < 70)
+    buckets, team_agg, sprints = _classify_insprint_teams(data)
+    total = sum(len(v) for v in buckets.values())
     rows = [["Element", "Calculation", "Value"],
             ["Sprints used (auto-detected)", "last 2 by numeric sort", ", ".join(sprints) or "—"],
-            ["Unique teams classified", "—", str(len(team_best))],
-            [">70 % In-Sprint bar", "teams whose best Automation coverage ≥ 70", str(above)],
-            ["<70 % In-Sprint bar", "teams whose best Automation coverage < 70", str(below)]]
+            ["Unique teams classified", "—", str(total)],
+            [">70 % In-Sprint bar", "MaxCov ≥ 70", str(len(buckets["gt70"]))],
+            ["<70 % In-Sprint bar", "0 < MaxCov < 70", str(len(buckets["lt70"]))],
+            ["Tech-Debt Automation bar", "MaxCov = 0 and Σ TD > 0", str(len(buckets["tech"]))],
+            ["Script Maintainance bar", "MaxCov = 0, Σ TD = 0, Σ Maint > 0", str(len(buckets["maint"]))],
+            ["No Automation bar", "MaxCov = 0, Σ TD = 0, Σ Maint = 0", str(len(buckets["none"]))]]
     flow.append(_table(rows, col_widths=[5.5 * cm, 7.5 * cm, 2.5 * cm]))
+    # No Automation team → reason breakdown
+    if buckets["none"]:
+        flow.append(Spacer(1, 4))
+        flow.append(Paragraph("<b>No Automation teams → reason breakdown</b>", st["body"]))
+        rows2 = [["Reason (from 'Comment (If Automation Cov is 0%)')", "Team(s)", "#"]]
+        by_reason = {}
+        for team in buckets["none"]:
+            d = team_agg.get(team, {"comments": []})
+            reason = d["comments"][0] if d["comments"] else "(No reason given)"
+            by_reason.setdefault(reason, []).append(team)
+        for reason in sorted(by_reason, key=lambda x: -len(by_reason[x])):
+            teams = by_reason[reason]
+            rows2.append([reason[:70], ", ".join(teams), str(len(teams))])
+        flow.append(_table(rows2, col_widths=[7 * cm, 6.5 * cm, 1.5 * cm]))
     return flow
 
 
@@ -239,12 +237,15 @@ def _section_slides_13_14(data, st):
     flow.append(Spacer(1, 6))
     flow.append(Paragraph("Slide 14 · 'Automation' panel (Rectangle 17 / Chart 18)", st["h2"]))
     flow.append(Paragraph(
-        "<b>Rule:</b> rows where Sprint is a <i>monthly bucket</i> "
-        "(NOT 'Sprint X.Y.Z') AND <i>Type Of Defect ∈ {Manual, Automation}</i> "
-        "AND <i>Sub Domain ≠ TBD</i>. Sum <i>Prod Defect Count</i> per Sub Domain. "
+        "<b>Rule:</b> rows in the <b>last 2 sprint cycles</b> (same window as "
+        "the Manual charts above — sprints that have Sub Domain data) "
+        "AND <i>Type Of Defect = Automation</i> AND <i>Sub Domain ≠ TBD</i>. "
+        "Per Sub Domain, <b>combine all severities across InSprint and Regression</b>: "
+        "sum(<i>InSprint Fatel + Serious + Medium + Low</i>) + "
+        "sum(<i>Regression Fatel + Serious + Medium + Low</i>). "
         "Header label = <i>Automation (&lt;grand total&gt;)</i>.", st["rule"]))
     auto = _compute_automation_prod_defects(data)
-    rows = [["Sub Domain", "Prod Defect Count"]]
+    rows = [["Sub Domain", "Combined defects"]]
     for sd in sorted(auto, key=lambda x: -auto[x]):
         if auto[sd] > 0:
             rows.append([sd, str(int(auto[sd]))])
@@ -258,13 +259,18 @@ def _section_slides_13_14(data, st):
 def _section_slide_15(data, st):
     flow = [Paragraph("Slide 15 · Production & Post-Production Defect View", st["h1"])]
     flow.append(Paragraph(
-        "<b>Source:</b> <i>DefectData</i> (same row filter as Slide 14 Automation panel). "
+        "<b>Source:</b> <i>DefectData</i>. <b>Filter:</b> Sprint is a "
+        "<i>monthly bucket</i> (NOT 'Sprint X.Y.Z') AND "
+        "<i>Type Of Defect ∈ {Manual, Automation}</i> AND "
+        "<i>Sub Domain ≠ TBD</i> AND <i>Prod Defect Count &gt; 0</i>. "
         "<b>Chart 12 (Domain Wise Defects):</b> share of total Prod Defect Count "
         "per Sub Domain. <b>Chart 13 (QA Miss Distribution):</b> a row is "
         "classified as <i>QA Miss</i> iff its <i>Prod Defect RCA</i> contains "
         "the literal substring '<i>qa miss</i>' (case-insensitive). Distribution "
         "is over Prod Defect Count. <b>Title:</b> auto-built from month buckets "
-        "present in the data.", st["rule"]))
+        "present in the data. Note — this uses a different filter than the "
+        "Slide 14 Automation panel (which now uses last 2 sprint cycles + "
+        "Type = Automation + all severities).", st["rule"]))
     pd_ = _prod_defects_by_subdomain(data)
     grand = sum(pd_.values())
     rows = [["Sub Domain", "Prod Defects", "Share"]]
@@ -320,7 +326,9 @@ def _section_slides_18_19(data, st):
     flow = [Paragraph("Slides 18–19 · Primary Release Automation", st["h1"])]
     flow.append(Paragraph(
         "<b>Source:</b> <i>ReleaseDayTestCaseSheet</i>. "
-        "<b>Rule:</b> group rows by Sub Domain (skip TBD). "
+        "<b>Rule:</b> group rows by Sub Domain (skip TBD / blank Sub Domain). "
+        "<b>No month filter</b> — sums are across <b>all Release Months</b> "
+        "present in the sheet. Per Sub Domain: "
         "Story Volume = sum(<i>No Of Stories part of the Release</i>); "
         "Automation Feasible TCs = sum(<i>No of Automation feasible TCs</i>); "
         "Automated TCs = sum(<i>No of TCs Automated</i>). "

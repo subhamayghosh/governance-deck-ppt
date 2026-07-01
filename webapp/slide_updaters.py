@@ -584,24 +584,38 @@ def _last_two_sprint_cycles(data):
 
 
 def _compute_automation_prod_defects(data):
-    """{sub_domain: prod_defect_count_total} filtered by:
-       Sprint is a monthly bucket (NOT 'Sprint X.Y.Z'),
-       Type Of Defect is Manual OR Automation,
-       Sub Domain != TBD.
-    Sums the 'Prod Defect Count' column per sub-domain.
+    """{sub_domain: total_defects} for the Slide 14 Automation panel.
+
+    Filters:
+      Sprint in the LAST 2 sprint cycles that have Sub Domain data
+        (same window used by the per-Sub Domain Manual charts on Slide 13/14),
+      Type Of Defect == Automation,
+      Sub Domain != TBD (and not blank).
+
+    Per Sub Domain, combine every severity across both InSprint and Regression:
+      total = InSprint (Fatel + Serious + Medium + Low)
+            + Regression (Fatel + Serious + Medium + Low)
     """
+    sprints = set(_last_two_sprint_cycles(data))
+    if not sprints:
+        return {}
+    severity_cols = [
+        "InSprint Fatel",   "Regression Fatel",
+        "InSprint Serious", "Regression Serious",
+        "InSprint Medium",  "Regression Medium",
+        "InSprint Low",     "Regression Low",
+    ]
     result = {}
     for r in data.get("defect_data", []):
         s = str(r.get("Sprint", "")).strip()
-        if not s or s.startswith("Sprint "):
-            continue  # skip sprint cycles, keep only month buckets
-        t = str(r.get("Type Of Defect", "")).strip().lower()
-        if t not in ("manual", "automation"):
+        if s not in sprints:
+            continue
+        if str(r.get("Type Of Defect", "")).strip().lower() != "automation":
             continue
         sub = str(r.get("Sub Domain", "")).strip()
         if not sub or sub == "TBD":
             continue
-        result[sub] = result.get(sub, 0) + _num(r.get("Prod Defect Count", 0))
+        result[sub] = result.get(sub, 0) + sum(_num(r.get(c, 0)) for c in severity_cols)
     return result
 
 
@@ -1171,15 +1185,11 @@ def _latest_release_month(data):
 def _compute_release_by_subdomain(data):
     """{sub_domain: {stories, feasible, automated}} from ReleaseDayTestCaseSheet.
 
-    Restricts to rows for the LATEST 'Release Month' present in the sheet
-    (e.g. April'26). Skips rows with blank / TBD Sub Domain.
+    Sums across ALL Release Month rows per Sub Domain
+    (skipping TBD / blank Sub Domain). No month filter.
     """
-    latest_month = _latest_release_month(data)
     result = {}
     for r in data.get("release_day", []):
-        if latest_month is not None:
-            if str(r.get("Release Month", "")).strip() != latest_month:
-                continue
         sub = str(r.get("Sub Domain", "")).strip()
         if not sub or sub == "TBD":
             continue

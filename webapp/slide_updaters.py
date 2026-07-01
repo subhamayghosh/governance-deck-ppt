@@ -421,6 +421,17 @@ def update_slide_12(slide, data):
     if not any(buckets.values()):
         return
 
+    # ---- Update the slide title with the actual sprint range ----
+    # Template ships something like "Automation Snapshot - Sprint 25.2.3 - Sprint 25.2.4";
+    # rewrite it using the sprints we actually classified.
+    if len(sprints) >= 1:
+        sprint_range = (sprints[0] if len(sprints) == 1
+                        else f"{sprints[0]} - {sprints[1]}")
+        for s in slide.shapes:
+            if s.has_text_frame and "Automation Snapshot" in s.text_frame.text:
+                _set_text_preserve_format(s, f"Automation Snapshot - {sprint_range}")
+                break
+
     # ---- Update the 5-bar chart ----
     counts_by_cat = {
         "No Automation":        len(buckets["none"]),

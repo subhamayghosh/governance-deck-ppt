@@ -300,62 +300,135 @@ def _automation_coverage_pct(v):
     return f * 100 if abs(f) <= 1 else f
 
 
-def update_slide_12(slide, data):
-    """Update the Automation Snapshot bar chart on slide 12.
+def _set_cell_text_preserve(cell, new_text):
+    """Replace a table cell's entire contents with `new_text` while keeping
+    the first run's font/color/size formatting. Any additional paragraphs
+    left over from the template are removed so old text doesn't leak through.
+    """
+    from pptx.oxml.ns import qn
+    tf = cell.text_frame
+    txBody = tf._txBody
+    # Remove every paragraph after the first
+    paragraphs = txBody.findall(qn("a:p"))
+    for p in paragraphs[1:]:
+        txBody.remove(p)
+    # Set the first paragraph's text, preserving its first run's formatting
+    first_p = tf.paragraphs[0]
+    if first_p.runs:
+        first_p.runs[0].text = new_text
+        for run in first_p.runs[1:]:
+            run.text = ""
+    else:
+        first_p.text = new_text
 
-    Rule for the '<70 % In-Sprint' and '>70 % In-Sprint' bars (user-specified):
-      1. Restrict to the LAST 2 sprint cycles found in InSprintData (Sprint
-         values starting with 'Sprint ', sorted numerically).
-      2. For each unique 'Scrum team' across those rows, take its BEST
-         (maximum) 'Automation coverage' value.
-      3. Count teams whose best coverage is >= 70  -> '>70 % In-Sprint'
-         Count teams whose best coverage is <  70  -> '<70 % In-Sprint'
 
-    Rows with blank/unparseable Automation coverage are skipped.
+def _classify_insprint_teams(data):
+    """Classify each Scrum team into one of 5 automation-health buckets based
+    on rows from the LAST 2 sprint cycles in InSprintData.
 
-    The other three bars ('No Automation', 'Script Maintainance',
-    'Tech-Debt Automation') are left at whatever values exist in the
-    template chart — they are not auto-derived in this implementation.
+    Aggregates per team across those rows:
+      max_cov  = max(Automation coverage)  (percentage, 0..100)
+      sum_td   = sum(Auto tech debt P0..P4)
+      sum_mnt  = sum(TCs Maintained)
+      comments = list of non-blank 'Comment (If Automation Cov is 0%)' values
+
+    Priority (first matching wins):
+      max_cov >= 70                                    -> 'gt70'   (>70 % In-Sprint)
+      0 < max_cov < 70                                 -> 'lt70'   (<70 % In-Sprint)
+      max_cov == 0 AND sum_td > 0                      -> 'tech'   (Tech-Debt Automation)
+      max_cov == 0 AND sum_td == 0 AND sum_mnt > 0     -> 'maint'  (Script Maintainance)
+      max_cov == 0 AND sum_td == 0 AND sum_mnt == 0    -> 'none'   (No Automation)
+
+    Returns (buckets, team_agg, sprints)
+      buckets: {'gt70': [teams], 'lt70': [...], 'tech': [...], 'maint': [...], 'none': [...]}
+      team_agg: {team: {'max_cov', 'sum_td', 'sum_mnt', 'comments'}}
+      sprints:  list of the 2 sprint names actually used (for reporting)
     """
     insprint = data.get("insprint_data", [])
     if not insprint:
-        return
+        return {"gt70": [], "lt70": [], "tech": [], "maint": [], "none": []}, {}, []
 
-    # 1. Find last 2 sprint cycles by numeric sort (handles e.g. 26.1.10 > 26.1.2)
-    sprint_col = None
-    if insprint:
-        for k in insprint[0].keys():
-            if str(k).strip().lower() == "sprint":
-                sprint_col = k
-                break
-    if sprint_col is None:
-        sprint_col = "Sprint  "  # trailing-spaces variant seen in InSprintData
+    # Detect Sprint column (may have trailing whitespace variants)
+    sprint_col = "Sprint"
+    for k in insprint[0].keys():
+        if str(k).strip().lower() == "sprint":
+            sprint_col = k
+            break
     sprints = sorted(
         {str(r.get(sprint_col, "")).strip() for r in insprint
          if str(r.get(sprint_col, "")).strip().startswith("Sprint ")},
         key=_sprint_sort_key,
     )[-2:]
     if not sprints:
-        return
+        return {"gt70": [], "lt70": [], "tech": [], "maint": [], "none": []}, {}, []
 
-    # 2. For each team in those sprints, take its best Automation coverage
-    team_best = {}
+    team_agg = {}
     for r in insprint:
         if str(r.get(sprint_col, "")).strip() not in sprints:
             continue
         team = str(r.get("Scrum team", "")).strip()
         if not team:
             continue
-        pct = _automation_coverage_pct(r.get("Automation coverage"))
-        if pct is None:
-            continue
-        if team not in team_best or pct > team_best[team]:
-            team_best[team] = pct
+        cov = _automation_coverage_pct(r.get("Automation coverage"))
+        td = sum(_num(r.get(f"Auto tech debt P{i}", 0)) for i in range(5))
+        mnt = _num(r.get("TCs Maintained", 0))
+        comment = str(r.get("Comment (If Automation Cov is 0%)", "") or "").strip()
+        d = team_agg.setdefault(team, {"max_cov": None, "sum_td": 0.0,
+                                       "sum_mnt": 0.0, "comments": []})
+        if cov is not None and (d["max_cov"] is None or cov > d["max_cov"]):
+            d["max_cov"] = cov
+        d["sum_td"] += td
+        d["sum_mnt"] += mnt
+        if comment and comment not in d["comments"]:
+            d["comments"].append(comment)
 
-    # 3. Classify teams
-    above_70 = sum(1 for v in team_best.values() if v >= 70)
-    below_70 = sum(1 for v in team_best.values() if v < 70)
+    buckets = {"gt70": [], "lt70": [], "tech": [], "maint": [], "none": []}
+    for team, d in team_agg.items():
+        mc = d["max_cov"] if d["max_cov"] is not None else 0
+        if mc >= 70:
+            buckets["gt70"].append(team)
+        elif mc > 0:
+            buckets["lt70"].append(team)
+        elif d["sum_td"] > 0:
+            buckets["tech"].append(team)
+        elif d["sum_mnt"] > 0:
+            buckets["maint"].append(team)
+        else:
+            buckets["none"].append(team)
+    return buckets, team_agg, sprints
 
+
+def update_slide_12(slide, data):
+    """Update the Automation Snapshot bar chart AND the 'Reason for no
+    Automation' table on slide 12.
+
+    Chart (5 bars, restricted to last 2 sprint cycles, per-team classification):
+      '>70 % In-Sprint'      = teams whose max Automation coverage >= 70
+      '<70 % In-Sprint'      = teams whose max Automation coverage is > 0 and < 70
+      'Tech-Debt Automation' = teams with Automation coverage = 0 and
+                               sum(Auto tech debt P0..P4) > 0
+      'Script Maintainance'  = teams with Automation coverage = 0 and
+                               sum(Auto tech debt P0..P4) = 0 and TCs Maintained > 0
+      'No Automation'        = teams with Automation coverage = 0 and
+                               sum(Auto tech debt P0..P4) = 0 and TCs Maintained = 0
+
+    Table 'Reason for no Automation':
+      Only teams in the 'No Automation' bucket. Grouped by their
+      'Comment (If Automation Cov is 0%)' value. One row per distinct
+      reason, showing '<reason> | [team1, team2, ...]' and the team count.
+    """
+    buckets, team_agg, sprints = _classify_insprint_teams(data)
+    if not any(buckets.values()):
+        return
+
+    # ---- Update the 5-bar chart ----
+    counts_by_cat = {
+        "No Automation":        len(buckets["none"]),
+        "Script Maintainance":  len(buckets["maint"]),
+        "Tech-Debt Automation": len(buckets["tech"]),
+        "<70 % In-Sprint":      len(buckets["lt70"]),
+        ">70 % In-Sprint":      len(buckets["gt70"]),
+    }
     for s in slide.shapes:
         if not s.has_chart:
             continue
@@ -364,28 +437,59 @@ def update_slide_12(slide, data):
             cats = [str(c).strip() for c in chart.plots[0].categories]
         except Exception:
             continue
-        # Locate the Automation Snapshot bar chart by its categories
         if "<70 % In-Sprint" not in cats or ">70 % In-Sprint" not in cats:
             continue
-
-        # Preserve existing values for the other categories
         try:
-            series_list = list(chart.plots[0].series)
-            series_name = series_list[0].name or "Teams"
-            existing = [int(v) if v is not None else 0 for v in series_list[0].values]
+            series_name = chart.plots[0].series[0].name or "Teams"
         except Exception:
             series_name = "Teams"
-            existing = [0] * len(cats)
-        while len(existing) < len(cats):
-            existing.append(0)
-
-        new_values = list(existing)
-        for i, cat in enumerate(cats):
-            if cat == "<70 % In-Sprint":
-                new_values[i] = below_70
-            elif cat == ">70 % In-Sprint":
-                new_values[i] = above_70
+        new_values = [counts_by_cat.get(c, 0) for c in cats]
         update_chart_data(chart, cats, {series_name: new_values})
+        break
+
+    # ---- Update the 'Reason for no Automation' table ----
+    # Group No-Automation teams by their reason comment
+    reason_to_teams = {}
+    for team in buckets["none"]:
+        d = team_agg.get(team, {"comments": []})
+        reason = d["comments"][0] if d["comments"] else "(No reason given)"
+        reason_to_teams.setdefault(reason, []).append(team)
+
+    for s in slide.shapes:
+        if not getattr(s, "has_table", False):
+            continue
+        tbl = s.table
+        # Expect: header row + N data rows + Total row.
+        n_rows = len(tbl.rows)
+        if n_rows < 3:
+            continue
+        data_rows_capacity = n_rows - 2  # exclude header + total
+        # Sort reasons by team count desc, then alpha
+        entries = sorted(reason_to_teams.items(),
+                         key=lambda x: (-len(x[1]), x[0].lower()))
+        # If more reasons than capacity, lump the tail into 'Others'
+        if len(entries) > data_rows_capacity:
+            head = entries[:data_rows_capacity - 1]
+            tail = entries[data_rows_capacity - 1:]
+            others_teams = [t for _, teams in tail for t in teams]
+            others_reasons = "; ".join(r for r, _ in tail)
+            head.append((f"Others ({others_reasons})", others_teams))
+            entries = head
+        grand = sum(len(t) for _, t in entries)
+        for i in range(data_rows_capacity):
+            row_idx = i + 1
+            if i < len(entries):
+                reason, teams = entries[i]
+                cell_text = f"{reason} | [{', '.join(teams)}]"
+                _set_cell_text_preserve(tbl.cell(row_idx, 0), cell_text)
+                _set_cell_text_preserve(tbl.cell(row_idx, 1), str(len(teams)))
+            else:
+                _set_cell_text_preserve(tbl.cell(row_idx, 0), "")
+                _set_cell_text_preserve(tbl.cell(row_idx, 1), "")
+        # Total row (last row)
+        total_idx = n_rows - 1
+        _set_cell_text_preserve(tbl.cell(total_idx, 0), "Total")
+        _set_cell_text_preserve(tbl.cell(total_idx, 1), str(grand))
         break
 
 
@@ -457,18 +561,26 @@ def _sprint_sort_key(sprint_name):
 
 
 def _last_two_sprint_cycles(data):
-    """Return the two most-recent sprint-cycle values from DefectData.
+    """Return the two most-recent sprint-cycle values from DefectData in which
+    *at least one row has a non-empty Sub Domain* (excluding 'TBD').
 
     A sprint cycle is any Sprint value starting with 'Sprint ' (e.g. 'Sprint 26.1.4').
     Monthly buckets like \"January'26\" are excluded. Sprints are sorted
     numerically (so 'Sprint 26.1.10' comes after 'Sprint 26.1.2', not before).
+
+    Sprints whose rows all have a blank or TBD Sub Domain are skipped —
+    otherwise the Defect View slides would silently produce empty charts
+    just because the latest sprint hasn't had Sub Domain filled in yet.
     """
-    sprints = set()
+    sprints_with_subdomain = set()
     for r in data.get("defect_data", []):
         s = str(r.get("Sprint", "")).strip()
-        if s.startswith("Sprint "):
-            sprints.add(s)
-    return sorted(sprints, key=_sprint_sort_key)[-2:]
+        if not s.startswith("Sprint "):
+            continue
+        sub = str(r.get("Sub Domain", "")).strip()
+        if sub and sub != "TBD":
+            sprints_with_subdomain.add(s)
+    return sorted(sprints_with_subdomain, key=_sprint_sort_key)[-2:]
 
 
 def _compute_automation_prod_defects(data):
@@ -1029,13 +1141,45 @@ RELEASE_SLIDE_19_PANELS = [
 ]
 
 
+def _latest_release_month(data):
+    """Return the most-recent 'Release Month' bucket in ReleaseDayTestCaseSheet
+    that has at least one row with a non-blank, non-TBD Sub Domain.
+
+    Values are formatted <MonthName>'YY (e.g. \"April'26\"). Sort key is
+    (year, month-index). Months whose rows all have blank/TBD Sub Domain are
+    skipped — otherwise every panel would collapse to zero the moment a new
+    Release Month is added before its Sub Domain cells are filled in.
+    Returns None if no month qualifies.
+    """
+    def _key(bucket):
+        try:
+            name, yr = bucket.split("'")
+            return (int(yr), list(_MONTH_SHORT.keys()).index(name.strip().lower()))
+        except Exception:
+            return (-1, -1)
+    months_with_subdomain = set()
+    for r in data.get("release_day", []):
+        m = str(r.get("Release Month", "")).strip()
+        sub = str(r.get("Sub Domain", "")).strip()
+        if m and sub and sub != "TBD":
+            months_with_subdomain.add(m)
+    if not months_with_subdomain:
+        return None
+    return max(months_with_subdomain, key=_key)
+
+
 def _compute_release_by_subdomain(data):
     """{sub_domain: {stories, feasible, automated}} from ReleaseDayTestCaseSheet.
 
-    Sums across all rows of each Sub Domain (skipping TBD / blank).
+    Restricts to rows for the LATEST 'Release Month' present in the sheet
+    (e.g. April'26). Skips rows with blank / TBD Sub Domain.
     """
+    latest_month = _latest_release_month(data)
     result = {}
     for r in data.get("release_day", []):
+        if latest_month is not None:
+            if str(r.get("Release Month", "")).strip() != latest_month:
+                continue
         sub = str(r.get("Sub Domain", "")).strip()
         if not sub or sub == "TBD":
             continue
@@ -1247,6 +1391,67 @@ def _update_trend_slide(slide, data, panels):
             automatable_name: new_automatable,
             automated_name:   new_automated,
         })
+
+        # After replace_data: the chart's series XML keeps any per-point
+        # data-label overrides (c:dLbl idx="N") from the template. Those
+        # overrides drive the on-bar number's font/color/position for the
+        # points they cover. When we add a NEW data point (the latest month),
+        # it has no per-point override and falls back to the series-level
+        # defaults — which in this template use dark text. Against dark bars
+        # that becomes invisible.
+        # Fix: for each series, if there is at least one per-point dLbl,
+        # clone it for every category index that doesn't yet have one, so
+        # the new bar's label inherits the same formatting as the historical ones.
+        _extend_trend_datalabels(chart, len(new_cats))
+
+
+def _extend_trend_datalabels(chart, n_cats):
+    """Ensure every category index 0..n_cats-1 has a c:dLbl override matching
+    the styling of the existing per-point overrides on this series. Called
+    after python-pptx's replace_data(), which does not touch dLbl elements.
+    """
+    from pptx.oxml.ns import qn
+    from copy import deepcopy
+    C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    for ser in chart.plots[0].series:
+        ser_xml = ser._element
+        dLbls = ser_xml.find(qn("c:dLbls"))
+        if dLbls is None:
+            continue
+        existing_dLbl = dLbls.findall(qn("c:dLbl"))
+        if not existing_dLbl:
+            continue  # No per-point overrides at all — series-level covers all
+        # Find which indices already have per-point overrides
+        covered = set()
+        for dl in existing_dLbl:
+            idx_el = dl.find(qn("c:idx"))
+            if idx_el is not None:
+                try:
+                    covered.add(int(idx_el.get("val")))
+                except (TypeError, ValueError):
+                    pass
+        # Clone the first override as a template for any missing index
+        template = existing_dLbl[0]
+        for i in range(n_cats):
+            if i in covered:
+                continue
+            clone = deepcopy(template)
+            # Update its idx
+            new_idx = clone.find(qn("c:idx"))
+            if new_idx is not None:
+                new_idx.set("val", str(i))
+            # Strip any c:extLst inside the clone that carries a uniqueId —
+            # we don't want two dLbl elements sharing the same GUID.
+            for ext_lst in clone.findall(qn("c:extLst")):
+                clone.remove(ext_lst)
+            # Insert BEFORE the series-level trailing elements — the schema
+            # wants c:dLbl children to appear before c:spPr / c:txPr / etc.
+            # Simplest: insert right after the last existing c:dLbl.
+            last_dLbl_pos = 0
+            for j, child in enumerate(list(dLbls)):
+                if child.tag == qn("c:dLbl"):
+                    last_dLbl_pos = j + 1
+            dLbls.insert(last_dLbl_pos, clone)
 
 
 def update_slide_20(slide, data):

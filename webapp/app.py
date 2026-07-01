@@ -99,15 +99,19 @@ def build_domain_lookup(project_details):
 
 
 def fill_missing_domains(records, domain_lookup, team_col="Scrum Team Name"):
+    """Back-fill the *Domain* column when it's blank, using the ProjectDetails
+    team lookup. IMPORTANT: never back-fill *Sub Domain* — slide updaters
+    group strictly by whatever value the source sheet has in its Sub Domain
+    cell, so a blank cell there stays blank and the row is intentionally
+    excluded from Sub Domain groupings.
+    """
     for r in records:
         if not r.get("Domain"):
             team = str(r.get(team_col, "")).strip().lower()
             if team in domain_lookup:
                 r["Domain"] = domain_lookup[team][0]
-                r["Sub Domain"] = domain_lookup[team][1]
             else:
                 r["Domain"] = "Unknown"
-                r["Sub Domain"] = ""
     return records
 
 
